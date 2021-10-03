@@ -171,8 +171,11 @@ class LLTransform(ast.NodeVisitor):
         raise NotImplementedError('augmented assignment')
 
     def visit_Import(self, node: ast.Import) -> Any:
-        importlib.import_module()
-        raise NotImplementedError('import')
+        for alias in node.names:
+            pymod = importlib.import_module(alias.name)
+            pymod_name = alias.asname if alias.asname is not None else alias.name
+            # FIXME: Mixing ir.Value's and Python objects in this namespace.
+            self.namespace[pymod_name] = pymod
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
         raise NotImplementedError('import from')
@@ -180,7 +183,7 @@ class LLTransform(ast.NodeVisitor):
     # ______________________________________________________________________
     # Expressions
 
-    def visit_Name(self, node: ast.Name) -> ir.Value:
+    def visit_Name(self, node: ast.Name) -> Any:
         if isinstance(node.ctx, ast.Load):
             return self.lookup(node.id)
         raise NotImplementedError(f'unhandled name usage "{ast.dump(node)}"')
