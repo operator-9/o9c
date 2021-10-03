@@ -1,4 +1,5 @@
 import ast
+import importlib
 from typing import Any, Dict, List, NamedTuple, Optional
 
 from llvmlite import ir
@@ -37,6 +38,7 @@ BINOPS = {
         ir.FloatType: ir.IRBuilder.fmul,
         ir.DoubleType: ir.IRBuilder.fmul,
     },
+    # TODO: ast.MatMult
     ast.Div : {
         ir.IntType: ir.IRBuilder.udiv,
         ir.FloatType: ir.IRBuilder.fdiv,
@@ -46,6 +48,25 @@ BINOPS = {
         ir.IntType: ir.IRBuilder.urem,
         ir.FloatType: ir.IRBuilder.frem,
         ir.DoubleType: ir.IRBuilder.frem,
+    },
+    # TODO: ast.Pow
+    ast.LShift : {
+        ir.IntType: ir.IRBuilder.shl,
+    },
+    ast.RShift : {
+        ir.IntType: ir.IRBuilder.ashr,
+    },
+    ast.BitOr : {
+        ir.IntType: ir.IRBuilder.or_,
+    },
+    ast.BitXor : {
+        ir.IntType: ir.IRBuilder.xor,
+    },
+    ast.BitAnd : {
+        ir.IntType: ir.IRBuilder.and_,
+    },
+    ast.FloorDiv : {
+        ir.IntType: ir.IRBuilder.udiv,
     },
 }
 
@@ -63,6 +84,9 @@ class LLTransform(ast.NodeVisitor):
         self.namespace = {}
         self.namespaces = []
         self.builder = None
+
+    # ______________________________________________________________________
+    # Utilities
 
     def push_namespace(self):
         self.namespaces.append(self.namespace)
@@ -87,12 +111,18 @@ class LLTransform(ast.NodeVisitor):
     def handle_arg(self, arg: ast.arg) -> Arg:
         return Arg(arg.arg, self.handle_annotation(arg.annotation))
 
+    # ______________________________________________________________________
+    # Statements
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> Any:
         if self.function is not None:
             raise NotImplementedError('closures unsupportd')
         fname = node.name
         args = [self.handle_arg(arg) for arg in node.args.args]
-        ftype = ir.FunctionType(self.handle_annotation(node.returns), [arg.lltype for arg in args])
+        ftype = ir.FunctionType(
+            self.handle_annotation(node.returns),
+            [arg.lltype for arg in args]
+        )
         func = ir.Function(self.module, ftype, fname)
         self.function = func
         self.namespace[fname] = self.function
@@ -109,6 +139,47 @@ class LLTransform(ast.NodeVisitor):
         self.function = None
         return func
 
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Any:
+        raise NotImplementedError('async functions')
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> Any:
+        raise NotImplementedError('classes')
+
+    def visit_Return(self, node: ast.Return) -> Any:
+        return self.builder.ret(self.visit(node.value))
+
+    def visit_Delete(self, node: ast.Delete) -> Any:
+        raise NotImplementedError('delete')
+
+    def visit_Assign(self, node: ast.Assign) -> Any:
+        if self.function is None:
+            raise NotImplementedError('assignment of global')
+        llvalue = self.visit(node.value)
+        target_count = len(node.targets)
+        if target_count > 1:
+            raise NotImplementedError('tuple unpacking in assignment')
+        else:
+            assert target_count == 1
+            target = node.targets[0]
+            if not isinstance(target, ast.Name):
+                raise NotImplementedError('complex assignment')
+            llvalue.name = target.id
+            self.namespace[target.id] = llvalue
+        return llvalue
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> Any:
+        raise NotImplementedError('augmented assignment')
+
+    def visit_Import(self, node: ast.Import) -> Any:
+        importlib.import_module()
+        raise NotImplementedError('import')
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> Any:
+        raise NotImplementedError('import from')
+
+    # ______________________________________________________________________
+    # Expressions
+
     def visit_Name(self, node: ast.Name) -> ir.Value:
         if isinstance(node.ctx, ast.Load):
             return self.lookup(node.id)
@@ -119,18 +190,28 @@ class LLTransform(ast.NodeVisitor):
         left_type = type(left.type)
         right = self.visit(node.right)
         right_type = type(right.type)
-        assert left_type == right_type
         op_type = type(node.op)
+        if left_type != right_type:
+            raise TypeError(f'incompatible operands "{op_type} {left_type}, {right_type}"')
         return BINOPS[op_type][left_type](self.builder, left, right)
 
-    def visit_Return(self, node: ast.Return) -> Any:
-        return self.builder.ret(self.visit(node.value))
+    def visit_Constant(self, node: ast.Constant) -> ir.Value:
+        return {
+            bool: TYPES['bool'],
+            int: TYPES['int'],
+            float: TYPES['float'],
+        }[type(node.value)](node.value)
 
 
 if __name__ == '__main__':
     transformer = LLTransform()
     src = '''def fpadd(n0: float, n1: float) -> float:
     return n0 + n1
+
+def thingy(n0: int, n1: int) -> int:
+    x = n0 << 2
+    y = n1 << 2
+    return x + y
     '''
     tree = ast.parse(src)
     print(ast.dump(tree, indent=2))
